@@ -1,0 +1,15 @@
+[package]
+name = "lpcuckoo"
+version = "0.1.0"
+authors = ["Yaz Saito <yasushi.saito@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dev-dependencies]
+fasthash = "0.4.0"
+criterion = "0.3"
+
+[[bench]]
+name = "lphash_bench"
+harness = false
