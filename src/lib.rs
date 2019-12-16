@@ -91,7 +91,7 @@ where
         let hash_builder = Rc::new(b);
         LpCuckooHashMap {
             hash_builder: hash_builder.clone(),
-            raw: RawTable::with_shard_size(hash_builder.clone(), INITIAL_NUM_NODES_PER_SHARD),
+            raw: RawTable::with_shard_size(hash_builder.clone(), 0),
         }
     }
 }
@@ -107,6 +107,9 @@ struct Coord {
 
 // Compute log2 of the value. The arg must be a power of two.
 fn log2(n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
     let mut l2 = 1 as usize;
     for _ in 0..64 {
         if n == (1 << l2) {
@@ -149,19 +152,57 @@ impl<'a, K, V, S> Iterator for Iter<'a, K, V, S> {
     }
 }
 
+// Drain is an iterator created by drain() method.
+pub struct Drain<'a, K, V, S> {
+    raw: RawTable<K, V, S>,
+    orig: &'a mut RawTable<K, V, S>,
+    table_index: usize,
+}
+
+impl<'a, K, V, S> FusedIterator for Drain<'a, K, V, S> {}
+
+impl<'a, K, V, S> Drop for Drain<'a, K, V, S> {
+    fn drop(&mut self) {
+        while self.table_index < self.raw.table.len() {
+            self.raw.table[self.table_index].take();
+            self.table_index += 1;
+        }
+        self.raw.len = 0;
+        mem::swap(self.orig, &mut self.raw)
+    }
+}
+
+impl<'a, K, V, S> Iterator for Drain<'a, K, V, S> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.table_index < self.raw.table.len() {
+            let slot = &mut self.raw.table[self.table_index];
+            self.table_index += 1;
+            if let Some(_) = slot {
+                let node = slot.take().unwrap();
+                return Some((node.key, node.val));
+            }
+        }
+        return None;
+    }
+}
+
 impl<K, V, S> LpCuckooHashMap<K, V, S>
 where
     K: Eq + Hash,
     S: BuildHasher,
 {
-    // Looks up the map for the given key. The argument can be any type that can
-    // be borrowed as as the key type. For example, if the key is a `String`,
-    // then the arg for get can be `&str`.
+    /// Looks up the map for the given key. The argument can be any type that
+    /// can be borrowed as as the key type. For example, if the key is a
+    /// `String`, then the arg can be a `&str`.
     pub fn get<Q>(&self, k: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
+        if self.raw.table.len() == 0 {
+            return None;
+        }
         self.raw.get(k)
     }
 
@@ -190,10 +231,26 @@ where
         };
     }
 
-    // Inserts the given key/value pair in the map. If the key does not already
-    // exist in the map, this function returns None. Else, it overwrites the
-    // entry with the new value and returns the old value.
+    /// Clears the map, returning all key-value pairs as an iterator. Keeps the
+    /// allocated memory for reuse.
+    pub fn drain(&mut self) -> Drain<'_, K, V, S> {
+        let mut d = Drain {
+            raw: RawTable::with_shard_size(self.hash_builder.clone(), 0),
+            orig: &mut self.raw,
+            table_index: 0,
+        };
+        mem::swap(&mut d.raw, d.orig);
+        d
+    }
+
+    /// Inserts the given key/value pair in the map. If the key does not already
+    /// exist in the map, this function returns None. Else, it overwrites the
+    /// entry with the new value and returns the old value.
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        if self.raw.table.len() == 0 {
+            self.raw =
+                RawTable::with_shard_size(self.hash_builder.clone(), INITIAL_NUM_NODES_PER_SHARD);
+        }
         loop {
             match self.raw.entry(&k) {
                 RawEntry::Entry(Some(node)) => return Some(mem::replace(&mut node.val, v)),
@@ -230,19 +287,16 @@ where
     S: BuildHasher,
 {
     fn with_shard_size(hash_builder: Rc<S>, shard_len: usize) -> RawTable<K, V, S> {
-        assert!(shard_len > 0);
-        let table_len = shard_len * NUM_SHARDS;
         let table = RawTable {
             hash_builder: hash_builder,
-            table: (0..table_len).map(|_| None).collect(),
+            table: (0..shard_len * NUM_SHARDS).map(|_| None).collect(),
             len: 0,
             shard_len: shard_len,
-            shard_len_mask: shard_len - 1,
+            shard_len_mask: if shard_len == 0 { 0 } else { shard_len - 1 },
             shard_len_log2: log2(shard_len),
             tmp_chain: Default::default(),
             tmp_queue: Default::default(),
         };
-        assert!((1 << table.shard_len_log2) == table.shard_len);
         table
     }
 
@@ -449,6 +503,7 @@ mod tests {
         //let mut m = Map::new();
         let mut m = new_map();
         assert_eq!(m.len(), 0);
+        assert_eq!(m.capacity(), 0);
         assert_eq!(m.get("blah"), None);
         assert_eq!(m.insert(String::from("blah"), String::from("foo")), None);
         assert_eq!(m.len(), 1);
@@ -497,6 +552,31 @@ mod tests {
                 assert_eq!(*val, (key_val + 100).to_string());
             }
             assert_eq!(got_keys.len(), i + 1);
+        }
+    }
+
+    #[test]
+    fn drain() {
+        let key_fn = |i: usize| (i + 100).to_string();
+        let val_fn = |i: usize| (i + 200).to_string();
+        let mut m = new_map();
+        const NUM_ELEMS: usize = 1000;
+        for _rep in 0..2 {
+            for i in 0..NUM_ELEMS {
+                let key = key_fn(i);
+                let val = val_fn(i);
+                assert_eq!(m.insert(key, val), None);
+            }
+            let mut got_keys = HashSet::<Key>::new();
+            for (key, val) in m.drain() {
+                assert!(got_keys.insert(key.clone()));
+                let key_val = key.parse::<i32>().unwrap();
+                assert!(key_val >= 100 && key_val < 100 + NUM_ELEMS as i32);
+                assert_eq!(*val, (key_val + 100).to_string());
+            }
+            assert_eq!(got_keys.len(), NUM_ELEMS);
+            assert_eq!(m.len(), 0);
+            assert!(m.capacity() >= 500);
         }
     }
 }
