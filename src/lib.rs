@@ -17,6 +17,29 @@
 //!
 //! https://www.cs.princeton.edu/~mfreed/docs/cuckoo-eurosys14.pdf
 //!
+//! # Examples
+//!
+//! ```
+//! use lpcuckoo::LpCuckooHashMap;
+//!
+//! let mut map = LpCuckooHashMap<String, String>::new();
+//!
+//! map.insert("key0".to_string(), "val0".to_string());
+//! map.insert("key1".to_string(), "val1".to_string());
+//! assert_eq!(map.get("key0"), Some("val0".to_string()));
+//! assert_eq!(map.remove_entry("key0"), Some(("key0".to_string(), "val0".to_string())));
+//! assert_eq!(map.get("key0"), None);
+//! ```
+//!
+//! # Benchmarks
+//!
+//! On Core i5 5300U 2.3GHz, using seahash:
+//!
+//!  - insert one entry: 100ns
+//!  - insert 16 entries: 518ns
+//!  - insert 128 entries: 22us
+//!  - lookup one entry: 15ns
+//!
 use std::borrow::Borrow;
 use std::collections;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -274,6 +297,18 @@ where
             }
         }
     }
+
+    /// Removes a key from the map, returning the stored key and value if the
+    /// key was previously in the map.  The argument can be any type that can be
+    /// borrowed as as the key type. For example, if the key is a `String`, then
+    /// the arg can be a `&str`.
+    pub fn remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.raw.remove_entry(k)
+    }
 }
 
 enum RawEntry<'a, K, V> {
@@ -311,6 +346,27 @@ where
                 match self.slot(hi, ti) {
                     Some(node) if k.eq(node.key.borrow()) => return Some(&node.val),
                     _ => (),
+                }
+                ti = next_node(ti, self.shard_len);
+            }
+        }
+        return None;
+    }
+
+    fn remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        for hi in 0..NUM_SHARDS {
+            let mut ti = (self.make_hash(hi, k) as usize) & self.shard_len_mask;
+            for _ in 0..BUCKET_WIDTH {
+                let slot = self.slot_mut(hi, ti);
+                if let Some(node) = slot {
+                    if k.eq(node.key.borrow()) {
+                        let node = slot.take().unwrap();
+                        return Some((node.key, node.val));
+                    }
                 }
                 ti = next_node(ti, self.shard_len);
             }
@@ -509,6 +565,11 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m.get("blah"), Some(&String::from("foo")));
         assert_eq!(m.get("blah2"), None);
+        assert_eq!(
+            m.remove_entry("blah"),
+            Some((String::from("blah"), String::from("foo")))
+        );
+        assert_eq!(m.get("blah"), None);
     }
 
     #[test]

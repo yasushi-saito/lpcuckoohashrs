@@ -16,3 +16,26 @@ It also incorporates some of the ideas presented in the following paper:
   David G. Andersen, Michael Kaminsky, Michael J. Freedman, Eurosys 14.
 
 https://www.cs.princeton.edu/~mfreed/docs/cuckoo-eurosys14.pdf
+
+# Examples
+
+```
+use lpcuckoo::LpCuckooHashMap;
+
+let mut map = LpCuckooHashMap<String, String>::new();
+
+map.insert("key0".to_string(), "val0".to_string());
+map.insert("key1".to_string(), "val1".to_string());
+assert_eq!(map.get("key0"), Some("val0".to_string()));
+assert_eq!(map.remove_entry("key0"), Some(("key0".to_string(), "val0".to_string())));
+assert_eq!(map.get("key0"), None);
+```
+
+# Benchmarks
+
+On Core i5 5300U 2.3GHz, using seahash:
+
+ - insert one entry: 100ns
+ - insert 16 entries: 518ns
+ - insert 128 entries: 22us
+ - lookup one entry: 15ns
